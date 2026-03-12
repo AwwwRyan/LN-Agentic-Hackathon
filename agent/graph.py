@@ -52,15 +52,8 @@ def final_routing(state: NegotiationState) -> Literal["continue", "escalate"]:
         return "continue"
     return "escalate"
 
-from langgraph.checkpoint.sqlite import SqliteSaver
-import os
-
-# Ensure storage directory exists
-if not os.path.exists("data/storage"):
-    os.makedirs("data/storage")
-
-# Use SQLite for persistence so server reloads don't wipe the negotiation state
-memory = SqliteSaver.from_conn_string("data/storage/checkpoints.db")
+from langgraph.checkpoint.memory import MemorySaver
+memory = MemorySaver()
 
 def create_graph():
     workflow = StateGraph(NegotiationState)

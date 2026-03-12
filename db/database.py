@@ -1,90 +1,60 @@
 import json
 import os
+import asyncio
 from datetime import datetime
-from typing import Optional, List
+from typing import Dict, Any, List
 
-DATA_DIR = "data/storage"
-RFQS_FILE = os.path.join(DATA_DIR, "rfqs.json")
-QUOTES_FILE = os.path.join(DATA_DIR, "quotes.json")
-OUTCOMES_FILE = os.path.join(DATA_DIR, "outcomes.json")
+# Local JSON storage paths
+STORAGE_DIR = "data/storage"
+RFQS_FILE = f"{STORAGE_DIR}/rfqs.json"
+QUOTES_FILE = f"{STORAGE_DIR}/quotes.json"
+OUTCOMES_FILE = f"{STORAGE_DIR}/outcomes.json"
 
 async def init_db():
-    """Ensure storage directory and JSON files exist."""
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
-    
-    for file_path in [RFQS_FILE, QUOTES_FILE, OUTCOMES_FILE]:
-        if not os.path.exists(file_path):
-            with open(file_path, "w") as f:
-                json.dump([], f)
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    for f in [RFQS_FILE, QUOTES_FILE, OUTCOMES_FILE]:
+        if not os.path.exists(f):
+            with open(f, "w") as file:
+                json.dump({}, file)
 
-def _read_json(file_path: str) -> List:
+def _load_json(filename: str) -> Dict[str, Any]:
+    if not os.path.exists(filename):
+        return {}
     try:
-        with open(file_path, "r") as f:
+        with open(filename, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    except:
+        return {}
 
-def _write_json(file_path: str, data: List):
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
+def _save_json(filename: str, data: Dict[str, Any]):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=4, default=str)
 
-async def save_rfq(rfq_data: dict):
-    """Save cleaned RFQ details to RFQS_FILE."""
-    data = _read_json(RFQS_FILE)
-    
-    rfq_id = rfq_data.get("rfq_id")
-    origin_name = rfq_data.get("origin_name_cleaned") or rfq_data.get("origin", {}).get("location_name")
-    dest_name = rfq_data.get("destination_name_cleaned") or rfq_data.get("destination", {}).get("location_name")
-    
-    rfq_entry = {
-        "rfq_id": rfq_id,
-        "origin": origin_name,
-        "destination": dest_name,
-        "truck_type": rfq_data.get("truck_type", "Unknown"),
-        "capacity": rfq_data.get("capacity", "0"),
-        "date_of_placement": rfq_data.get("date_of_placement"),
-        "status": rfq_data.get("status", "active"),
-        "created_at": datetime.now().isoformat()
-    }
-    
-    # Update if exists, else append
-    existing = next((r for r in data if r["rfq_id"] == rfq_data["rfq_id"]), None)
-    if existing:
-        data.remove(existing)
-    
-    data.append(rfq_entry)
-    _write_json(RFQS_FILE, data)
+async def save_rfq(rfq_data: Dict[str, Any]):
+    rfqs = _load_json(RFQS_FILE)
+    rfqs[rfq_data["rfq_id"]] = rfq_data
+    _save_json(RFQS_FILE, rfqs)
 
-async def save_quote(rfq_id: str, lsp_id: str, round_num: int, quote: float, counter: Optional[float]):
-    """Save a negotiation quote to QUOTES_FILE."""
-    data = _read_json(QUOTES_FILE)
+async def save_quote(rfq_id: str, lsp_id: str, round_num: int, quote_price: float, counter_price: float = None):
+    quotes = _load_json(QUOTES_FILE)
+    if rfq_id not in quotes:
+        quotes[rfq_id] = []
     
-    quote_entry = {
-        "rfq_id": rfq_id,
+    quotes[rfq_id].append({
         "lsp_id": lsp_id,
-        "round_number": round_num,
-        "quoted_price": quote,
-        "counter_price": counter,
+        "round": round_num,
+        "quote": quote_price,
+        "counter": counter_price,
         "timestamp": datetime.now().isoformat()
-    }
-    
-    data.append(quote_entry)
-    _write_json(QUOTES_FILE, data)
+    })
+    _save_json(QUOTES_FILE, quotes)
 
-async def save_outcome(rfq_id: str, recommendation: dict, benchmark: float):
-    """Save final negotiation outcome to OUTCOMES_FILE."""
-    data = _read_json(OUTCOMES_FILE)
-    
-    outcome_entry = {
-        "rfq_id": rfq_id,
-        "winning_lsp_id": recommendation.get("best_lsp_id"),
-        "final_price": recommendation.get("final_price"),
-        "benchmark_price": benchmark,
-        "savings_pct": recommendation.get("savings_pct"),
-        "total_rounds": recommendation.get("total_rounds", 0),
-        "created_at": datetime.now().isoformat()
+async def save_outcome(rfq_id: str, outcome_data: Dict[str, Any], benchmark: float = 0.0):
+    outcomes = _load_json(OUTCOMES_FILE)
+    outcomes[rfq_id] = {
+        **outcome_data,
+        "benchmark_at_close": benchmark,
+        "closed_at": datetime.now().isoformat()
     }
-    
-    data.append(outcome_entry)
-    _write_json(OUTCOMES_FILE, data)
+    _save_json(OUTCOMES_FILE, outcomes)

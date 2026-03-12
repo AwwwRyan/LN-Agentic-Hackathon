@@ -47,9 +47,7 @@
         "destination": {"location_name": "Delhi", "coordinates": [77.1025, 28.7041]},
         "travel_date": "2025-03-05"
       }
-    ],
-    "personality_type": "stubborn"
-  },
+    ]  },
   "LSP-002": {
     "transporter_id": "LSP-002",
     "transporter_name": "Swift Transway",
@@ -83,8 +81,7 @@
         "destination": {"location_name": "Bangalore", "coordinates": [77.5946, 12.9716]},
         "travel_date": "2025-03-01"
       }
-    ],
-    "personality_type": "aggressive"
+    ]
   },
   "LSP-003": {
     "transporter_id": "LSP-003",
@@ -119,8 +116,7 @@
         "destination": {"location_name": "Mumbai", "coordinates": [72.8777, 19.0760]},
         "travel_date": "2025-03-04"
       }
-    ],
-    "personality_type": "desperate"
+    ]
   },
   "LSP-004": {
     "transporter_id": "LSP-004",
@@ -155,8 +151,7 @@
         "destination": {"location_name": "Jaipur", "coordinates": [75.7873, 26.9124]},
         "travel_date": "2025-02-25"
       }
-    ],
-    "personality_type": "strategic"
+    ]
   },
   "LSP-005": {
     "transporter_id": "LSP-005",
@@ -196,7 +191,6 @@
         "destination": {"location_name": "Mumbai", "coordinates": [72.8777, 19.0760]},
         "travel_date": "2025-03-04"
       }
-    ],
-    "personality_type": "stubborn"
+    ]
   }
 }

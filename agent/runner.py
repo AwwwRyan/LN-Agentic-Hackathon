@@ -18,7 +18,6 @@ from logic.benchmark import predict_freight_rate
 from llm.gemini_client import gemini_negotiator
 from logic.scoring import compute_scores
 from db.database import save_rfq, save_quote, save_outcome
-from websocket_manager import manager
 
 from collections import defaultdict
 
@@ -132,9 +131,8 @@ async def initialize_rfq(rfq_id: str, rfq_data: dict) -> Dict[str, Any]:
                 f"💰 Budget Ceiling: ₹{rfq.get('max_budget', 0):,.0f}" if rfq.get('max_budget') else "💰 Budget: No hard ceiling specified"
             ],
         }
-        save_negotiation(rfq_id, state)
+    save_negotiation(rfq_id, state)
     
-    await manager.broadcast_to_rfq(rfq_id, {"type": "initialized", "message": "RFQ Initialized."})
     return state
 
 
@@ -272,7 +270,6 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str):
                 state.setdefault("dropped_lsps", []).append(lsp_id)
 
         save_negotiation(rfq_id, state)
-        await manager.broadcast_to_rfq(rfq_id, {"type": "ai_response", "lsp_id": lsp_id, "data": decision})
     
     # 4. Successor update
     asyncio.create_task(_safe_run_task(update_accumulator_logic(rfq_id)))
@@ -328,7 +325,6 @@ async def update_accumulator_logic(rfq_id: str):
                 state["messages_log"].append("🎯 AI has completed negotiation and generated a recommendation.")
         
         save_negotiation(rfq_id, state)
-        await manager.broadcast_to_rfq(rfq_id, {"type": "accumulator_update", "status": state["status"]})
 
 
 async def _run_manual_evaluation(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -372,8 +368,6 @@ async def process_manual_counters(rfq_id: str, counters: Dict[str, float]) -> Di
         state["status"] = "waiting_counters"
         state["messages_log"].append(f"👨‍💻 Client submitted manual counters.")
         save_negotiation(rfq_id, state)
-        
-        await manager.broadcast_to_rfq(rfq_id, {"type": "manual_counters_sent"})
         return {"status": "waiting_counters"}
 
 

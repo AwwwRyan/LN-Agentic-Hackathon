@@ -19,7 +19,7 @@ async def list_lsps():
 
 @router.get("/{lsp_id}/rfqs")
 async def get_lsp_rfqs(lsp_id: str):
-    """Get all RFQs relevant to a specific LSP (live and closed)."""
+    """Get all RFQs relevant to a specific LSP."""
     if not os.path.exists(NEGOTIATIONS_FILE):
         return []
     
@@ -28,10 +28,8 @@ async def get_lsp_rfqs(lsp_id: str):
     
     lsp_rfqs = []
     for rfq_id, state in negotiations.items():
-        # Check if LSP is in the transporter_list of the original RFQ
         transporters = state.get("rfq", {}).get("transporter_list", [])
         if any(t["transporter_id"] == lsp_id for t in transporters):
-            # Extract relevant info for the LSP view
             rfq_info = {
                 "rfq_id": rfq_id,
                 "origin": state["rfq"].get("origin_name_cleaned"),
