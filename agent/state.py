@@ -11,8 +11,6 @@ class NegotiationState(TypedDict):
     active_lsps: List[str]
     dropped_lsps: List[str]
     current_round: int
-    max_rounds: int
-    total_rounds: int
     rates: Dict[str, float]  # Current rate per LSP
     pending_quotes: Dict[str, float] # Quotes received via API this round
     history: Dict[str, List[Dict[str, Any]]]  # List of {round, quote, counter, justification}

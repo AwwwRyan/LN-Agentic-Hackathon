@@ -32,7 +32,6 @@ async def list_rfqs():
             "origin": state["rfq"].get("origin_name_cleaned"),
             "destination": state["rfq"].get("destination_name_cleaned"),
             "status": state["status"],
-            "current_round": state["current_round"],
             "mode": state.get("negotiation_mode", "ai")
         }
         for rfq_id, state in negotiations.items()
@@ -46,6 +45,7 @@ async def submit_lsp_quote(rfq_id: str, request: LSPQuoteRequest):
     In AI mode, evaluation and counter-offers are automatic.
     In Manual mode, evaluation happens but status waits for client counters.
     """
+    print(rfq_id, request.lsp_id, request.quote_price,"🔥🔥🔥🔥🔥🔥")
     result = await process_quote(rfq_id, request.lsp_id, request.quote_price)
     if "error" in result:
         status_code = 404 if "not found" in result["error"].lower() else 400
@@ -69,7 +69,6 @@ async def get_status(rfq_id: str, for_lsp: bool = False):
         "rfq_id": rfq_id,
         "status": state["status"],
         "mode": state.get("negotiation_mode", "ai"),
-        "current_round": state["current_round"],
         "benchmark_price": state["benchmark_price"] if not for_lsp else 0.0,
         "active_lsps": state["active_lsps"],
         "rates": state["rates"],
@@ -78,6 +77,7 @@ async def get_status(rfq_id: str, for_lsp: bool = False):
         "recommendation": state.get("recommendation"),
         "rfq": state.get("rfq", {}),
         "transporter_list": state["rfq"].get("transporter_list", []),
+        "max_budget": state.get("max_budget", 0),
         "messages": messages[-15:],
     }
 

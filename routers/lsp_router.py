@@ -39,7 +39,6 @@ async def get_lsp_rfqs(lsp_id: str):
                 "truck_type": state["rfq"].get("truck_type"),
                 "capacity": state["rfq"].get("capacity"),
                 "status": state["status"],
-                "current_round": state["current_round"],
                 "is_winner": state.get("recommendation", {}).get("best_lsp_id") == lsp_id if state["status"] == "booked" else False
             }
             lsp_rfqs.append(rfq_info)

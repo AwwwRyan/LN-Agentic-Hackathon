@@ -21,7 +21,8 @@ async def init_db():
 def _read_json(file_path: str) -> List:
     try:
         with open(file_path, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+            return data if isinstance(data, list) else []
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 

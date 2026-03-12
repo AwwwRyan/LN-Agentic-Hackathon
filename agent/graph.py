@@ -37,8 +37,8 @@ def should_continue_negotiation(state: NegotiationState) -> Literal["wait", "eva
 
 def final_routing(state: NegotiationState) -> Literal["continue", "escalate"]:
     """Decides if we start a new round or finish."""
-    if state["current_round"] >= state["max_rounds"]:
-        return "escalate"
+    # if state["current_round"] >= state["max_rounds"]:
+    #     return "escalate"
     
     if not state["active_lsps"]:
         return "escalate"
@@ -73,9 +73,8 @@ def create_graph():
     workflow.add_node("recommendation", recommendation_node)
     workflow.add_node("human_decision", human_decision_node)
     
-    def increment_round(state: NegotiationState):
-        return {"current_round": state["current_round"] + 1}
-    workflow.add_node("increment_round", increment_round)
+    workflow.add_node("human_decision", human_decision_node)
+    
 
     workflow.add_edge(START, "initialize")
     workflow.add_edge("initialize", "benchmark")
@@ -86,16 +85,7 @@ def create_graph():
         should_continue_initial,
         {
             "wait": "send_rfq",
-            "next": "increment_round"
-        }
-    )
-    
-    workflow.add_conditional_edges(
-        "increment_round",
-        final_routing,
-        {
-            "continue": "counter_offer",
-            "escalate": "scoring"
+            "next": "scoring" 
         }
     )
     
@@ -104,7 +94,7 @@ def create_graph():
         should_continue_negotiation,
         {
             "wait": "counter_offer",
-            "evaluate": "increment_round"
+            "evaluate": "scoring"
         }
     )
     

@@ -21,6 +21,7 @@ class NegotiationDecision(BaseModel):
 
 class FinalRecommendation(BaseModel):
     """The final integrated recommendation for the human procurement manager."""
+    best_lsp_id: str = Field(description="The ID of the top-ranked LSP (e.g., 'LSP-001').")
     best_lsp_name: str = Field(description="Name of the top-ranked LSP based on price and service metrics.")
     analysis_why: str = Field(
         description="Detailed explanation: focus on PRICE vs RELIABILITY trade-off. "
@@ -62,7 +63,7 @@ NEGOTIATION TACTICS (AI MODE):
 - If Quote is BELOW benchmark → ACCEPT immediately.
 - If Quote is 5-25% ABOVE benchmark → COUNTER. 
 - Counter Formula: benchmark + (quote - benchmark) * 0.25. (Offer to meet 25% of the way from benchmark).
-- If LSP shows NO movement for 2 rounds → DROP.
+# - If LSP shows NO movement for 2 rounds → DROP.
 - NEVER counter higher than the LSP's latest quote.
 
 JUSTIFICATION STYLE:
@@ -91,7 +92,7 @@ class GeminiNegotiator:
 
     async def decide_negotiation_action(self, rfq: Dict[str, Any], lsp_profile: Dict[str, Any], 
                                         benchmark: float, history: List[Dict[str, Any]], 
-                                        round_num: int) -> Dict[str, Any]:
+                                        round_num: int, force_better_deal: bool = False) -> Dict[str, Any]:
         """Decide: ACCEPT, COUNTER, or DROP for this LSP."""
         last_quote = history[-1]["quote"]
         lane = f"{rfq.get('origin_name_cleaned')} to {rfq.get('destination_name_cleaned')}"
@@ -113,7 +114,6 @@ class GeminiNegotiator:
         Manufacturer Budget: {f'₹{budget:,.0f}' if budget else 'Not Specified'} (MUST STAY BELOW THIS IF POSSIBLE)
         Lane: {lane}
         Cargo: {cargo}
-        Round: {round_num}
         Market Benchmark: ₹{benchmark:,.2f}
         Current Quote: ₹{last_quote:,.2f}
         History: {json.dumps(history, indent=2)}
@@ -121,22 +121,41 @@ class GeminiNegotiator:
         Decide: ACCEPT, COUNTER, or DROP for this LSP.
         
         CRITICAL: 
-        1. If Quote > Manufacturer Budget, you MUST COUNTER aggressively or DROP if it's late rounds and they aren't moving.
+        1. If Quote > Manufacturer Budget, you should generally COUNTER aggressively. However, if the LSP has an EXCEPTIONALLY high rating (4.5+) and proven scale, you may 'ACCEPT' even if slightly over budget.
         2. Reference their 'Lane Experience' ({'Verified Experience on Corridor' if has_lane_exp else 'First time on this Corridor'}) in your justification.
-        3. If their quote (₹{last_quote:,.2f}) is BELOW both benchmark and budget, ACCEPT it.
+        3. Only ACCEPT if the quote (₹{last_quote:,.2f}) is within or near the budget, unless the LSP is elite.
         4. If you COUNTER, your counter_price MUST be LOWER than ₹{last_quote:,.2f}.
+        5. If an LSP is significantly above budget and has shown no price movement for 2 rounds, you should DROP them.
+        6. If the history shows you already 'ACCEPTED' this price, but you are being asked again, it means the client wants a BETTER deal. In this case, you MUST COUNTER for an additional 2-5% discount.
         """
+        
+        if force_better_deal:
+            prompt += """
+            
+            IMPORTANT CONTEXT: The human client has specifically rejected your previous 'ACCEPT' decision and wants you to negotiate for a BETTER offer. 
+            You must be more aggressive. Do NOT 'ACCEPT' the current quote again. COUNTER for 3-7% lower.
+            """
 
         try:
             result = await self.decision_chain.ainvoke(prompt)
             decision = result.dict()
             
-            # Decisiveness check
-            if decision["decision"] == "COUNTER" and budget > 0 and last_quote > budget and round_num >= 2:
-                # If late round and still above budget, reconsider DROP if no movement
-                if len(history) > 1 and history[-1]["quote"] >= history[-2]["quote"]:
+            # RELAXED OVERRIDE: Allow over-budget acceptance ONLY for exceptional LSPs (Rating 4.5+)
+            rating = lsp_profile.get("overall_rating", 0)
+            if decision["decision"] == "ACCEPT" and budget > 0 and last_quote > budget:
+                if rating < 4.5:
+                    decision["decision"] = "COUNTER"
+                    decision["counter_price"] = budget
+                    decision["reasoning"] = f"Budget Control: LSP (Rating {rating}) is over budget. Forcing counter at budget ceiling."
+
+            # STALEMATE DETECTION: Drop LSPs that are stuck above budget
+            if budget > 0 and last_quote > budget:
+                # Check history for movement
+                recent_quotes = [h["quote"] for h in history[-2:]] if len(history) >= 2 else []
+                if len(recent_quotes) == 2 and recent_quotes[1] >= recent_quotes[0]:
                     decision["decision"] = "DROP"
-                    decision["reasoning"] = "LSP is stuck above manufacturer budget constraint after multiple rounds."
+                    decision["reasoning"] = "Automatic DROP: LSP is stuck above budget with no movement in the last 2 rounds."
+                    decision["justification"] = "We have reached our budget ceiling and cannot accept further offers at this level without significant movement."
 
             # Safety: ensure counter_price is actually lower than the quote
             if decision["decision"] == "COUNTER" and decision.get("counter_price"):
@@ -153,7 +172,7 @@ class GeminiNegotiator:
                 "reasoning": f"LLM error fallback: {str(e)}"
             }
 
-    async def generate_final_recommendation(self, state: Dict[str, Any]) -> str:
+    async def generate_final_recommendation(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Generates the final recommendation summary."""
         rfq = state['rfq']
         lane = f"{rfq.get('origin_name_cleaned', '?')} → {rfq.get('destination_name_cleaned', '?')}"
@@ -173,6 +192,12 @@ class GeminiNegotiator:
 
         === TASK ===
         Generate a HACKATHON-READY summary that highlights the AGENT'S DECISION MAKING.
+        
+        CRITICAL RULES FOR SELECTING best_lsp_id:
+        1. SCORE SUPERIORITY: The 'Scores' provided in the battleboard are your primary source of truth. If multiple LSPs are within a reasonable range, always prefer the one with the HIGHEST Score to ensure the best balance of value and reliability.
+        2. BUDGET FLEXIBILITY: While staying under budget is ideal, it is NOT a hard-and-fast rule. If an LSP has an exceptionally good Rating or Score that far outweighs others, you SHOULD consider recommending them even if their quote exceeds the Manufacturer Budget.
+        3. STRATEGIC ANALYSIS: Explain your trade-off clearly. If you are picking a more expensive LSP because of their superior reliability/scale, justify why that premium is worth it for the client.
+
         Focus on:
         1. Trade-off: Price vs Reliability vs Lane Experience.
         2. Budget Alignment: Did we beat the budget constraint?
@@ -188,7 +213,7 @@ class GeminiNegotiator:
             if budget > 0:
                 budget_status = "- **Budget Status:** ✅ UNDER BUDGET" if res.final_price <= budget else "- **Budget Status:** ⚠️ OVER BUDGET"
 
-            return f"""
+            summary = f"""
 🚀 **NEGOTIATION COMPLETED**
 
 🥇 **RECOMMENDED PARTNER: {res.best_lsp_name}**
@@ -208,8 +233,9 @@ class GeminiNegotiator:
 
 🎯 **CONFIDENCE:** {res.confidence_level}
             """.strip()
+            return {"summary": summary, "best_id": res.best_lsp_id}
         except Exception as e:
-            return f"Recommendation generation failed: {str(e)}"
+            return {"summary": f"Recommendation generation failed: {str(e)}", "best_id": None}
 
     async def analyze_overall_strategy(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """

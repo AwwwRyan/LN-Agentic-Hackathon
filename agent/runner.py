@@ -49,12 +49,19 @@ def save_negotiation(rfq_id: str, state: Dict[str, Any]):
     data[rfq_id] = state
     _save_all(data)
 
+_bg_tasks = set()
+
 async def _safe_run_task(coro):
     """Utility to run a background task and log errors."""
     try:
         await coro
     except Exception as e:
         logger.exception(f"Background Task Failed: {str(e)}")
+
+def run_in_background(coro):
+    task = asyncio.create_task(_safe_run_task(coro))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 async def initialize_rfq(rfq_id: str, rfq_data: dict) -> Dict[str, Any]:
@@ -111,13 +118,12 @@ async def initialize_rfq(rfq_id: str, rfq_data: dict) -> Dict[str, Any]:
             "rfq_id": rfq_id,
             "rfq": rfq,
             "negotiation_mode": rfq.get("negotiation_mode", "ai"),
+            "auto_accept": rfq.get("auto_accept", False),
             "max_budget": rfq.get("max_budget", 0),
             "benchmark_price": benchmark,
             "lsp_profiles": {lid: profiles[lid] for lid in active_lsps},
             "active_lsps": active_lsps,
             "dropped_lsps": [],
-            "current_round": 0,
-            "max_rounds": 5,
             "rates": {lid: 0.0 for lid in active_lsps},
             "history": {lid: [] for lid in active_lsps},
             "decisions": {},
@@ -171,7 +177,7 @@ async def process_quote(rfq_id: str, lsp_id: str, quote_price: float) -> Dict[st
             "timestamp": datetime.now().isoformat(),
         }
         state["history"][lsp_id].append(new_bid)
-        state["messages_log"].append(f"📩 Quote Received: {lsp_id} offered ₹{quote_price:,.0f} (Round {lsp_round})")
+        state["messages_log"].append(f"📩 Quote Received: {lsp_id} offered ₹{quote_price:,.0f}")
 
         # Sync to RFQ list
         transporters = state["rfq"].get("transporter_list", [])
@@ -187,12 +193,14 @@ async def process_quote(rfq_id: str, lsp_id: str, quote_price: float) -> Dict[st
                 })
                 break
         
-        # Check transition
+        # Check transition - move to negotiation_in_progress as soon as we start receiving quotes
         responded_count = sum(1 for lid in state["active_lsps"] if len(state["history"].get(lid, [])) > 0)
-        if state["status"] == "waiting_quotes" and responded_count == len(state["active_lsps"]):
+        if state["status"] == "waiting_quotes" and responded_count > 0:
             if state["negotiation_mode"] == "ai":
                 state["status"] = "negotiation_in_progress"
-                state["messages_log"].append("📝 All initial quotes received. Transitioning to active negotiation.")
+                state["messages_log"].append("📝 Received initial quote. AI Negotiation engaged.")
+            elif responded_count == len(state["active_lsps"]):
+                state["status"] = "awaiting_manual_review"
         
         save_negotiation(rfq_id, state)
 
@@ -200,20 +208,20 @@ async def process_quote(rfq_id: str, lsp_id: str, quote_price: float) -> Dict[st
     await save_quote(rfq_id, lsp_id, lsp_round, quote_price, counter_price)
     
     # 3. Trigger Background Tasks
-    if state["negotiation_mode"] == "ai" and lsp_round < state["max_rounds"]:
-        asyncio.create_task(_safe_run_task(negotiate_with_single_lsp(rfq_id, lsp_id)))
+    if state["negotiation_mode"] == "ai": 
+        run_in_background(negotiate_with_single_lsp(rfq_id, lsp_id))
     
     if state["negotiation_mode"] == "manual" and responded_count == len(state["active_lsps"]):
          # Trigger manual board update
-         asyncio.create_task(_safe_run_task(_run_manual_evaluation(state)))
+         run_in_background(_run_manual_evaluation(state))
 
     # Refresh Accumulator
-    asyncio.create_task(_safe_run_task(update_accumulator_logic(rfq_id)))
+    run_in_background(update_accumulator_logic(rfq_id))
     
     return {"status": "received", "lsp_id": lsp_id}
 
 
-async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str):
+async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str, force_better_deal: bool = False):
     """
     AI Negotiator Core.
     Calculates decision then applies it to state using Lock.
@@ -232,7 +240,7 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str):
 
     # 2. Decision logic (LONG CALL - WITHOUT LOCK)
     decision = await gemini_negotiator.decide_negotiation_action(
-        rfq_ref, profile, benchmark, history, current_round
+        rfq_ref, profile, benchmark, history, current_round, force_better_deal=force_better_deal
     )
 
     # 3. Apply decision (RE-ACQUIRE LOCK)
@@ -242,7 +250,8 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str):
         
         state["decisions"][lsp_id] = decision
         budget = state.get("max_budget", 0)
-        budget_sign = "⚠️" if budget > 0 and decision.get("counter_price", 0) > budget else "💸"
+        counter_price = decision.get("counter_price") or 0
+        budget_sign = "⚠️" if budget > 0 and counter_price > budget else "💸"
         
         msg = f"🤖 AI Response to {lsp_id}: **{decision['decision']}**"
         if decision['decision'] == 'COUNTER':
@@ -258,7 +267,7 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str):
         transporters = state["rfq"].get("transporter_list", [])
         for t in transporters:
             if t["transporter_id"] == lsp_id:
-                status_map = {"ACCEPT": "accepted", "COUNTER": "counter offer", "DROP": "rejected"}
+                status_map = {"ACCEPT": "negotiated", "COUNTER": "counter offer", "DROP": "rejected"}
                 if t.get("rate_list"):
                     # Use index -1 to update the LATEST rate which should be the one being negotiated
                     t["rate_list"][-1]["bid_status"] = status_map.get(decision["decision"], "pending")
@@ -275,7 +284,7 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str):
         await manager.broadcast_to_rfq(rfq_id, {"type": "ai_response", "lsp_id": lsp_id, "data": decision})
     
     # 4. Successor update
-    asyncio.create_task(_safe_run_task(update_accumulator_logic(rfq_id)))
+    run_in_background(update_accumulator_logic(rfq_id))
 
 
 async def update_accumulator_logic(rfq_id: str):
@@ -290,13 +299,18 @@ async def update_accumulator_logic(rfq_id: str):
         valid_rates = {lid: rate for lid, rate in state["rates"].items() if rate > 0}
         if not valid_rates: return
         
+        # Only compute scores for LSPs who actually gave a valid quote > 0
+        quoted_lsps = list(valid_rates.keys())
+        
         # Prepare data for LLM
-        scores = compute_scores(state["active_lsps"], state["rates"], state["benchmark_price"], state["lsp_profiles"])
+        scores = compute_scores(quoted_lsps, state["rates"], state["benchmark_price"], state["lsp_profiles"])
         state["scores"] = scores
         state_for_llm = dict(state)
 
     # 2. Recommendation logic (LONG CALL - WITHOUT LOCK)
-    summary = await gemini_negotiator.generate_final_recommendation(state_for_llm)
+    rec_result = await gemini_negotiator.generate_final_recommendation(state_for_llm)
+    llm_summary = rec_result.get("summary", "")
+    llm_best_id = rec_result.get("best_id")
     
     # 3. Apply update (RE-ACQUIRE LOCK)
     async with RFQ_LOCKS[rfq_id]:
@@ -304,16 +318,22 @@ async def update_accumulator_logic(rfq_id: str):
         if not state: return
         
         # Re-verify best after possible other bids during LLM call
-        scores = compute_scores(state["active_lsps"], state["rates"], state["benchmark_price"], state["lsp_profiles"])
+        valid_rates_again = {lid: rate for lid, rate in state["rates"].items() if rate > 0}
+        quoted_lsps_again = list(valid_rates_again.keys())
+        
+        scores = compute_scores(quoted_lsps_again, state["rates"], state["benchmark_price"], state["lsp_profiles"])
         state["scores"] = scores
-        best_id = max(scores, key=scores.get) if scores else None
+        
+        # Use LLM choice as primary source of truth for the 'Recommendation' card
+        # but fallback to math-based best if LLM ID is invalid or missing
+        best_id = llm_best_id if llm_best_id in valid_rates_again else max(scores, key=scores.get) if scores else None
         
         state["recommendation"] = {
             "best_lsp_id": best_id,
             "best_lsp_name": state["lsp_profiles"].get(best_id, {}).get("transporter_name", best_id) if best_id else "None",
             "final_price": state["rates"].get(best_id, 0.0) if best_id else 0.0,
             "benchmark": state["benchmark_price"],
-            "summary": summary,
+            "summary": llm_summary,
             "savings_pct": round(((state["benchmark_price"] - state["rates"].get(best_id, 0)) / state["benchmark_price"]) * 100, 1) if best_id and state["benchmark_price"] > 0 else 0
         }
 
@@ -321,11 +341,16 @@ async def update_accumulator_logic(rfq_id: str):
         if state["negotiation_mode"] == "ai":
             terminal_statuses = ["ACCEPT", "DROP"]
             all_terminal = all(state["decisions"].get(lid, {}).get("decision") in terminal_statuses for lid in state["active_lsps"])
-            max_reached = any(len(h) >= state["max_rounds"] for h in state["history"].values())
             
-            if (all_terminal or max_reached) and state["status"] not in ("booked", "cancelled", "pending_human_verdict"):
-                state["status"] = "pending_human_verdict"
-                state["messages_log"].append("🎯 AI has completed negotiation and generated a recommendation.")
+            if all_terminal and state["status"] not in ("booked", "cancelled", "pending_human_verdict"):
+                if state.get("auto_accept", False) and best_id:
+                    state["status"] = "booked"
+                    state["messages_log"].append("🎯 AI has completed negotiation and generated a recommendation.")
+                    state["messages_log"].append(f"🤖 AUTO-BOOKED: RFQ directly awarded to {best_id} at ₹{state['rates'].get(best_id, 0):,.0f}")
+                    run_in_background(save_outcome(rfq_id, state["recommendation"], state["benchmark_price"]))
+                else:
+                    state["status"] = "pending_human_verdict"
+                    state["messages_log"].append("🎯 AI has completed negotiation and generated a recommendation. Waiting for Client Verdict.")
         
         save_negotiation(rfq_id, state)
         await manager.broadcast_to_rfq(rfq_id, {"type": "accumulator_update", "status": state["status"]})
@@ -380,8 +405,11 @@ async def process_manual_counters(rfq_id: str, counters: Dict[str, float]) -> Di
 async def process_human_decision(rfq_id: str, decision: str) -> Dict[str, Any]:
     async with RFQ_LOCKS[rfq_id]:
         state = get_negotiation(rfq_id)
-        if not state or state["status"] != "pending_human_verdict":
-            return {"error": "No recommendation pending."}
+        if not state:
+            return {"error": "RFQ not found."}
+        
+        if not state.get("recommendation"):
+            return {"error": "No recommendation available yet."}
 
         if decision == "accept":
             state["status"] = "booked"
@@ -398,9 +426,42 @@ async def process_human_decision(rfq_id: str, decision: str) -> Dict[str, Any]:
             return {"status": "cancelled"}
         
         elif decision == "push":
-            state["status"] = "pending_manual_counter"
-            state["messages_log"].append("🔄 Client requested additional negotiation round.")
+            state["status"] = "negotiation_in_progress"
+            # Clear previous terminal decisions to allow re-negotiation in UI
+            state["decisions"] = {} 
+            
+            # Reset the bid statuses in the transporter_list so the UI doesn't look 'finished'
+            for t in state["rfq"].get("transporter_list", []):
+                if t.get("rate_list"):
+                    last_rate = t["rate_list"][-1]
+                    if last_rate.get("bid_status") in ("negotiated", "rejected"):
+                        last_rate["bid_status"] = "pending"
+
+            state["messages_log"].append("🔄 Client requested additional negotiation round. Re-entering live negotiation.")
             save_negotiation(rfq_id, state)
-            return {"status": "pending_manual_counter"}
+            
+            # Broadcast immediately so UI flips back to progress mode
+            await manager.broadcast_to_rfq(rfq_id, {"type": "accumulator_update", "status": state["status"]})
+            
+            run_in_background(trigger_full_renegotiation(rfq_id))
+            return {"status": "negotiation_in_progress"}
 
     return {"error": "Invalid decision."}
+
+
+async def trigger_full_renegotiation(rfq_id: str):
+    """
+    Called when human wants to push for more rounds.
+    Forces AI to reconsider ALL active LSPs based on the current board.
+    """
+    async with RFQ_LOCKS[rfq_id]:
+        state = get_negotiation(rfq_id)
+        if not state: return
+        # Pulse every active LSP that has at least one quote
+        active_with_quotes = [lid for lid, quotes in state["history"].items() if len(quotes) > 0]
+
+    for lsp_id in active_with_quotes:
+        await negotiate_with_single_lsp(rfq_id, lsp_id, force_better_deal=True)
+    
+    # Refresh Accumulator once all AI pulses are done
+    await update_accumulator_logic(rfq_id)

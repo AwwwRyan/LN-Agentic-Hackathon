@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.rfq_router import router as rfq_router
@@ -13,10 +15,9 @@ logging.basicConfig(
 
 app = FastAPI(title="Lorri.ai Autonomous Negotiation Agent")
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all for hackathon
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

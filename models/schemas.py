@@ -35,6 +35,7 @@ class RFQSubmitRequest(BaseModel):
     negotiation_mode: Literal["ai", "manual"] = "ai"
     max_budget: Optional[float] = None # Manufacturer's ceiling
     transporter_list: List[TransporterEntry]
+    auto_accept: bool = False
 
 class LSPQuoteRequest(BaseModel):
     lsp_id: str
@@ -74,7 +75,6 @@ class LSPProfile(BaseModel):
 class NegotiationStatusResponse(BaseModel):
     rfq_id: str
     status: str
-    current_round: int
     active_lsps: List[str]
     rates: Dict[str, float]
     benchmark_price: float

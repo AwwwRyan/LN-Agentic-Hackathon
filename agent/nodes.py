@@ -57,9 +57,6 @@ async def initialize_node(state: NegotiationState) -> Dict[str, Any]:
         "lsp_profiles": profiles,
         "active_lsps": active_lsps,
         "dropped_lsps": [],
-        "current_round": 0,
-        "total_rounds": 0,
-        "max_rounds": 5,
         "rates": {},
         "pending_quotes": {},
         "history": {lsp_id: [] for lsp_id in active_lsps},
@@ -183,10 +180,6 @@ async def counter_offer_node(state: NegotiationState) -> Dict[str, Any]:
     """
     from langgraph.types import interrupt
     
-    current_round = state['current_round']
-    # If this is a fresh entry into the node (all decisions are from the previous round),
-    # we increment the round counter.
-    
     new_active = state['active_lsps'].copy()
     new_dropped = state['dropped_lsps'].copy()
     new_rates = state['rates'].copy()
@@ -200,10 +193,8 @@ async def counter_offer_node(state: NegotiationState) -> Dict[str, Any]:
         if d.get("decision") == "COUNTER"
     ]
     
-    # We check history to see who already responded in THIS round
-    # Note: In our system, we increment round AFTER everyone responds, or we can track strictly.
-    # Let's use current_round + 1 as the target round for these responses.
-    target_round = current_round + 1
+    # Calculate target round based on the maximum history length of active LSPs
+    target_round = max([len(h) for h in new_history.values()] + [0])
     
     responded_already = []
     for lsp_id in lsps_to_wait_for:
