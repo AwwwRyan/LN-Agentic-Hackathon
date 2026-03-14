@@ -113,9 +113,63 @@ async def human_decision(rfq_id: str, request: HumanDecisionRequest):
     return result
 
 
+@router.get("/outcomes")
+async def get_outcomes():
+    """Get all saved outcomes."""
+    from db.database import OUTCOMES_FILE, _read_json
+    return _read_json(OUTCOMES_FILE)
+
+
+@router.get("/market-insights")
+async def get_market_insights():
+    """Get market insights (mocked or from benchmark logic)."""
+    # Simply return a list of lane keys that have history
+    from agent.runner import _load_all
+    negotiations = _load_all()
+    insights = []
+    for rfq_id, state in negotiations.items():
+        if state.get("benchmark_price"):
+            insights.append({
+                "lane_key": f"{state['rfq'].get('origin_name_cleaned')} - {state['rfq'].get('destination_name_cleaned')}",
+                "benchmark": state["benchmark_price"],
+                "truck_type": state["rfq"].get("truck_type")
+            })
+    return insights
+
+
+@router.get("/autocomplete")
+async def autocomplete_proxy(query: str):
+    """Proxy for Lorri's autocomplete API."""
+    import requests
+    url = "https://production.lorri.in/api/apiuser/autocomplete"
+    params = {
+        "suggest": query,
+        "limit": 5,
+        "searchFields": "new_locations"
+    }
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+    }
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        data = response.json()
+        return data.get("value", []) if isinstance(data, dict) else data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.websocket("/ws/{rfq_id}")
 async def rfq_websocket(websocket: WebSocket, rfq_id: str):
     """WebSocket for real-time negotiation updates."""
+    state = get_negotiation(rfq_id)
+    
+    # If negotiation is already finalized, don't allow persistent connection
+    if state and state.get("status") in ("booked", "cancelled"):
+        await websocket.accept()
+        await websocket.close(code=1000, reason="Negotiation finished")
+        return
+
     await manager.connect(websocket, rfq_id)
     try:
         while True:
