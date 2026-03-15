@@ -17,6 +17,15 @@ async def list_lsps():
         profiles = json.load(f)
     return list(profiles.values())
 
+
+@router.get("/debug/data")
+def get_all_data():
+    return {
+        "rfqs": read_json("data/rfqs.json"),
+        "negotiations": read_json("data/negotiations.json"),
+        "lsp_profiles": read_json("data/lsp_profiles.json")
+    }
+
 @router.get("/{lsp_id}/rfqs")
 async def get_lsp_rfqs(lsp_id: str):
     """Get all RFQs relevant to a specific LSP (live and closed)."""
