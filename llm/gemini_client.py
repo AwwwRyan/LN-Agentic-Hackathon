@@ -71,9 +71,9 @@ JUSTIFICATION STYLE:
 
 class GeminiNegotiator:
     def __init__(self):
-        self.api_key = os.environ.get("GOOGLE_API_KEY")
+        self.api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
-            logger.warning("GOOGLE_API_KEY not found in environment.")
+            logger.warning("Neither GOOGLE_API_KEY nor GEMINI_API_KEY found in environment.")
         
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash",
