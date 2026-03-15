@@ -18,11 +18,20 @@ async def list_lsps():
     return list(profiles.values())
 
 
+def read_json(path):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except:
+        return []
+
 @router.get("/debug/data")
 def get_all_data():
     return {
-        "rfqs": read_json("data/rfqs.json"),
-        "negotiations": read_json("data/negotiations.json"),
+        "rfqs": read_json("data/storage/rfqs.json"),
+        "negotiations": read_json("data/storage/negotiations.json"),
         "lsp_profiles": read_json("data/lsp_profiles.json")
     }
 

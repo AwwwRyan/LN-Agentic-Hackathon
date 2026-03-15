@@ -241,10 +241,14 @@ async def process_lsp_acceptance(rfq_id: str, lsp_id: str, accepted_price: float
             "timestamp": datetime.now().isoformat()
         }
 
-        # Update rfq transporter_list status
+        # Update rates to the accepted price
+        state["rates"][lsp_id] = accepted_price
+        
+        # Update rfq transporter_list status and price
         transporters = state["rfq"].get("transporter_list", [])
         for t in transporters:
             if t["transporter_id"] == lsp_id:
+                t["current_rate"] = accepted_price
                 if t.get("rate_list"):
                     t["rate_list"][-1]["bid_status"] = "accepted"
                 break
@@ -406,7 +410,9 @@ async def update_accumulator_logic(rfq_id: str):
             "summary": llm_summary,
             "benchmark_savings_pct": round(((benchmark - final_p) / benchmark) * 100, 1) if best_id and benchmark > 0 else 0,
             "budget_savings_pct": round(((budget - final_p) / budget) * 100, 1) if best_id and budget > 0 else 0,
-            "is_transporter_acceptance": winner_accepted
+            "savings_pct": round(((benchmark - final_p) / benchmark) * 100, 1) if best_id and benchmark > 0 else 0,
+            "is_transporter_acceptance": winner_accepted,
+            "total_rounds": len(state["history"].get(best_id, [])) if best_id else 0
         }
 
         # Transition status to pending_human_verdict if terminal or acceptance occurred
