@@ -158,7 +158,7 @@ async def manual_counter(rfq_id: str, request: ManualCounterRequest):
 @router.post("/{rfq_id}/decision")
 async def human_decision(rfq_id: str, request: HumanDecisionRequest):
     """Final decision: accept winner, reject all, or push for an extra manual round."""
-    result = await process_human_decision(rfq_id, request.decision)
+    result = await process_human_decision(rfq_id, request.decision, request.lsp_id)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result

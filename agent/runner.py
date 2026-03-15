@@ -253,6 +253,15 @@ async def process_lsp_acceptance(rfq_id: str, lsp_id: str, accepted_price: float
                     t["rate_list"][-1]["bid_status"] = "accepted"
                 break
 
+        # Record this final price in the history so it shows up in logs and history tables
+        state["history"][lsp_id].append({
+            "round": len(state["history"].get(lsp_id, [])),
+            "quote": accepted_price,
+            "counter": accepted_price,
+            "timestamp": datetime.now().isoformat(),
+            "event": "acceptance"
+        })
+
         state["messages_log"].append(f"🤝 **TRANS-ACCEPT**: {lsp_id} has accepted the counter-offer of Rs {accepted_price:,.0f}.")
         save_negotiation(rfq_id, state)
 
@@ -393,14 +402,17 @@ async def update_accumulator_logic(rfq_id: str):
         # Selection Logic:
         # Priority 1: Use LLM recommended ID if it's valid.
         # Priority 2: Use highest score among those who actually QUOTED.
-        best_id = llm_best_id if llm_best_id in valid_rates_again else max(scores, key=scores.get) if scores else None
+        benchmark = state.get("benchmark_price", 0)
+        budget = state.get("max_budget", 0)
+        
+        # Clean the ID from LLM (sometimes it adds spaces or quotes)
+        clean_best_id = llm_best_id.strip().replace('"', '').replace("'", "") if llm_best_id else None
+        best_id = clean_best_id if clean_best_id in valid_rates_again else max(scores, key=scores.get) if scores else None
+        
+        final_p = state["rates"].get(best_id, 0)
         
         # Check if the chosen winner is someone who accepted the counter-offer
         winner_accepted = state["decisions"].get(best_id, {}).get("decision") == "ACCEPT_BY_TRANSPORTER"
-        
-        benchmark = state.get("benchmark_price", 0)
-        budget = state.get("max_budget", 0)
-        final_p = state["rates"].get(best_id, 0)
         
         state["recommendation"] = {
             "best_lsp_id": best_id,
@@ -412,7 +424,8 @@ async def update_accumulator_logic(rfq_id: str):
             "budget_savings_pct": round(((budget - final_p) / budget) * 100, 1) if best_id and budget > 0 else 0,
             "savings_pct": round(((benchmark - final_p) / benchmark) * 100, 1) if best_id and benchmark > 0 else 0,
             "is_transporter_acceptance": winner_accepted,
-            "total_rounds": len(state["history"].get(best_id, [])) if best_id else 0
+            "total_rounds": max(1, len(state["history"].get(best_id, []))) if best_id else 0,
+            "scores": scores
         }
 
         # Transition status to pending_human_verdict if terminal or acceptance occurred
@@ -486,23 +499,43 @@ async def process_manual_counters(rfq_id: str, counters: Dict[str, float]) -> Di
         return {"status": "waiting_counters"}
 
 
-async def process_human_decision(rfq_id: str, decision: str) -> Dict[str, Any]:
+async def process_human_decision(rfq_id: str, decision: str, lsp_id: Optional[str] = None) -> Dict[str, Any]:
     async with RFQ_LOCKS[rfq_id]:
         state = get_negotiation(rfq_id)
         if not state:
             return {"error": "RFQ not found."}
         
-        if not state.get("recommendation"):
-            return {"error": "No recommendation available yet."}
-
         if decision == "accept":
+            # If a specific LSP was chosen by the human, override the recommendation
+            if lsp_id:
+                # Update recommendation to reflect manual choice
+                state["recommendation"] = {
+                    "best_lsp_id": lsp_id,
+                    "best_lsp_name": state["lsp_profiles"].get(lsp_id, {}).get("transporter_name", lsp_id),
+                    "final_price": state["rates"].get(lsp_id, 0),
+                    "benchmark": state.get("benchmark_price", 0),
+                    "summary": f"Manual selection by procurement officer.",
+                    "total_rounds": max(1, len(state["history"].get(lsp_id, []))),
+                    "savings_pct": round(((state.get("benchmark_price", 0) - state["rates"].get(lsp_id, 0)) / state.get("benchmark_price", 1)) * 100, 1)
+                }
+
+            if not state.get("recommendation"):
+                return {"error": "No recommendation available yet."}
+
             state["status"] = "booked"
             winner_id = state["recommendation"]["best_lsp_id"]
-            state["messages_log"].append(f"✅ RFQ Booked with {winner_id} at ₹{state['rates'][winner_id]:,.0f}")
+            state["messages_log"].append(f"✅ RFQ Booked with {winner_id} (Manual Selection)" if lsp_id else f"✅ RFQ Booked with {winner_id}")
             save_negotiation(rfq_id, state)
             await save_outcome(rfq_id, state["recommendation"], state["benchmark_price"], state.get("max_budget", 0))
             return {"status": "booked"}
         
+        elif decision == "push":
+            state["status"] = "pending_manual_counter"
+            state["messages_log"].append("🔄 Client requested an additional manual negotiation round.")
+            save_negotiation(rfq_id, state)
+            await manager.broadcast_to_rfq(rfq_id, {"type": "manual_push", "status": "pending_manual_counter"})
+            return {"status": "pending_manual_counter"}
+            
         elif decision == "reject":
             state["status"] = "cancelled"
             state["messages_log"].append("❌ RFQ Cancelled by client.")

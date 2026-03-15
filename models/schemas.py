@@ -49,6 +49,7 @@ class LSPAcceptRequest(BaseModel):
 class HumanDecisionRequest(BaseModel):
     rfq_id: str
     decision: Literal["accept", "push", "reject"]
+    lsp_id: Optional[str] = None
 
 class FinancialRecord(BaseModel):
     financial_year: str
