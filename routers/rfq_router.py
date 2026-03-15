@@ -1,6 +1,8 @@
+# Force reload
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
-from models.schemas import RFQSubmitRequest, HumanDecisionRequest, LSPQuoteRequest, ManualCounterRequest
-from agent.runner import initialize_rfq, process_quote, process_human_decision, get_negotiation, process_manual_counters
+from models.schemas import RFQSubmitRequest, HumanDecisionRequest, LSPQuoteRequest, ManualCounterRequest, LSPAcceptRequest
+from logic.benchmark import predict_freight_rate
+from agent.runner import initialize_rfq, process_quote, process_human_decision, get_negotiation, process_manual_counters, process_lsp_acceptance
 from websocket_manager import manager
 from typing import Dict, Any, List
 
@@ -32,10 +34,49 @@ async def list_rfqs():
             "origin": state["rfq"].get("origin_name_cleaned"),
             "destination": state["rfq"].get("destination_name_cleaned"),
             "status": state["status"],
-            "mode": state.get("negotiation_mode", "ai")
+            "mode": state.get("negotiation_mode", "ai"),
+            "truck_type": state["rfq"].get("truck_type", ""),
+            "capacity": state["rfq"].get("capacity", ""),
+            "date_of_placement": state["rfq"].get("date_of_placement", ""),
         }
         for rfq_id, state in negotiations.items()
     ]
+
+@router.post("/benchmark")
+async def get_benchmark(request: RFQSubmitRequest):
+    rfq = request.dict()
+    rfq["origin_name_cleaned"] = rfq["origin"].get("location_name", "Unknown")
+    rfq["destination_name_cleaned"] = rfq["destination"].get("location_name", "Unknown")
+    capacity_val = 10.0
+    try:
+        capacity_str = rfq.get("capacity", "10")
+        import re
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", capacity_str)
+        if nums:
+            capacity_val = float(nums[0])
+    except:
+        pass
+    
+    result_str = predict_freight_rate.func(
+        origin_location=rfq["origin"].get("location", {}),
+        destination_location=rfq["destination"].get("location", {}),
+        origin_coordinates=rfq["origin"].get("coordinates"),
+        destination_coordinates=rfq["destination"].get("coordinates"),
+        origin_name=rfq["origin_name_cleaned"],
+        destination_name=rfq["destination_name_cleaned"],
+        truck_type=rfq.get("truck_type", "10 wheeler open body"),
+        no_of_wheels=10, 
+        capacity_mt=capacity_val,
+    )
+
+    benchmark = 100000.0
+    if result_str != "FAILED":
+        try:
+            benchmark = float(result_str)
+        except Exception:
+            benchmark = 50000.0
+
+    return {"benchmark": benchmark}
 
 
 @router.post("/{rfq_id}/quote")
@@ -45,11 +86,21 @@ async def submit_lsp_quote(rfq_id: str, request: LSPQuoteRequest):
     In AI mode, evaluation and counter-offers are automatic.
     In Manual mode, evaluation happens but status waits for client counters.
     """
-    print(rfq_id, request.lsp_id, request.quote_price,"🔥🔥🔥🔥🔥🔥")
     result = await process_quote(rfq_id, request.lsp_id, request.quote_price)
     if "error" in result:
         status_code = 404 if "not found" in result["error"].lower() else 400
         raise HTTPException(status_code=status_code, detail=result["error"])
+    return result
+
+
+@router.post("/{rfq_id}/accept")
+async def accept_lsp_counter(rfq_id: str, request: LSPAcceptRequest):
+    """
+    LSP accepts the client's counter-offer.
+    """
+    result = await process_lsp_acceptance(rfq_id, request.lsp_id, request.accepted_price)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 

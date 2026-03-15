@@ -13,7 +13,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-app = FastAPI(title="Lorri.ai Autonomous Negotiation Agent")
+app = FastAPI(title="SitBack Autonomous Negotiation Agent")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,7 +35,7 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"message": "Lorri.ai Autonomous Negotiation Agent API is running."}
+    return {"message": "SitBack Autonomous Negotiation Agent API is running."}
 
 if __name__ == "__main__":
     import uvicorn

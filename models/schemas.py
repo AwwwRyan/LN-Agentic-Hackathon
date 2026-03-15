@@ -41,6 +41,11 @@ class LSPQuoteRequest(BaseModel):
     lsp_id: str
     quote_price: float
 
+class LSPAcceptRequest(BaseModel):
+    rfq_id: str
+    lsp_id: str
+    accepted_price: float
+
 class HumanDecisionRequest(BaseModel):
     rfq_id: str
     decision: Literal["accept", "push", "reject"]

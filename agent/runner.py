@@ -221,6 +221,41 @@ async def process_quote(rfq_id: str, lsp_id: str, quote_price: float) -> Dict[st
     return {"status": "received", "lsp_id": lsp_id}
 
 
+MAX_ROUNDS = 5
+
+async def process_lsp_acceptance(rfq_id: str, lsp_id: str, accepted_price: float):
+    """
+    Called when an LSP accepts a client's counter-offer.
+    Immediately surfaces a recommendation to the client.
+    """
+    async with RFQ_LOCKS[rfq_id]:
+        state = get_negotiation(rfq_id)
+        if not state:
+            return {"error": "RFQ not found"}
+
+        # Mark as accepted by transporter
+        state["decisions"][lsp_id] = {
+            "decision": "ACCEPT_BY_TRANSPORTER",
+            "justification": f"Transporter {lsp_id} has accepted the counter-offer of Rs {accepted_price:,.0f}.",
+            "accepted_price": accepted_price,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # Update rfq transporter_list status
+        transporters = state["rfq"].get("transporter_list", [])
+        for t in transporters:
+            if t["transporter_id"] == lsp_id:
+                if t.get("rate_list"):
+                    t["rate_list"][-1]["bid_status"] = "accepted"
+                break
+
+        state["messages_log"].append(f"🤝 **TRANS-ACCEPT**: {lsp_id} has accepted the counter-offer of Rs {accepted_price:,.0f}.")
+        save_negotiation(rfq_id, state)
+
+    # Refresh accumulator to surface the specific selection screen
+    await update_accumulator_logic(rfq_id)
+    return {"status": "success"}
+
 async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str, force_better_deal: bool = False):
     """
     AI Negotiator Core.
@@ -234,13 +269,26 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str, force_better_deal:
         
         profile = state["lsp_profiles"].get(lsp_id, {})
         history = list(state["history"].get(lsp_id, []))
-        current_round = len(history) - 1
+        current_round_num = len(history) # 1-based round count
+        
+        # Scenario B - Enforcement: If round 5 is reached, we stop countering.
+        if current_round_num >= MAX_ROUNDS:
+             state["decisions"][lsp_id] = {
+                 "decision": "EXHAUSTED",
+                 "justification": "Maximum negotiation rounds (5) reached. This is the final best offer.",
+                 "reasoning": "Round limit reached."
+             }
+             state["messages_log"].append(f"⏹️ **ROUNDS EXHAUSTED**: {lsp_id} has reached the 5-round limit. Case closed.")
+             save_negotiation(rfq_id, state)
+             await update_accumulator_logic(rfq_id)
+             return
+
         rfq_ref = dict(state["rfq"])
         benchmark = state["benchmark_price"]
 
     # 2. Decision logic (LONG CALL - WITHOUT LOCK)
     decision = await gemini_negotiator.decide_negotiation_action(
-        rfq_ref, profile, benchmark, history, current_round, force_better_deal=force_better_deal
+        rfq_ref, profile, benchmark, history, current_round_num - 1, force_better_deal=force_better_deal
     )
 
     # 3. Apply decision (RE-ACQUIRE LOCK)
@@ -255,7 +303,7 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str, force_better_deal:
         
         msg = f"🤖 AI Response to {lsp_id}: **{decision['decision']}**"
         if decision['decision'] == 'COUNTER':
-            msg += f" at {budget_sign} ₹{decision['counter_price']:,.0f}"
+            msg += f" at {budget_sign} Rs {decision['counter_price']:,.0f}"
         
         reason = decision.get("reasoning", "")
         if reason:
@@ -290,6 +338,9 @@ async def negotiate_with_single_lsp(rfq_id: str, lsp_id: str, force_better_deal:
 async def update_accumulator_logic(rfq_id: str):
     """
     Watches the Board. Serially updates recommendation.
+    Handles Specific Termination Scenarios:
+    A. Transporter Accepts Counter-Offer (ACCEPT_BY_TRANSPORTER)
+    B. Round Limit Reached (EXHAUSTED)
     """
     # 1. Gather state for recommendation
     async with RFQ_LOCKS[rfq_id]:
@@ -301,56 +352,83 @@ async def update_accumulator_logic(rfq_id: str):
         
         # Only compute scores for LSPs who actually gave a valid quote > 0
         quoted_lsps = list(valid_rates.keys())
-        
-        # Prepare data for LLM
         scores = compute_scores(quoted_lsps, state["rates"], state["benchmark_price"], state["lsp_profiles"])
         state["scores"] = scores
         state_for_llm = dict(state)
 
-    # 2. Recommendation logic (LONG CALL - WITHOUT LOCK)
+    # 2. Check for Terminal State (All LSPs either DROP, ACCEPT, EXHAUSTED, or ACCEPT_BY_TRANSPORTER)
+    terminal_statuses = ["ACCEPT", "DROP", "EXHAUSTED", "ACCEPT_BY_TRANSPORTER"]
+    all_terminal = all(
+        state["decisions"].get(lid, {}).get("decision") in terminal_statuses 
+        for lid in state["active_lsps"]
+    )
+    
+    # Check if ANYONE has accepted (critical for Scenario A surfacing)
+    anybody_accepted = any(dec.get("decision") == "ACCEPT_BY_TRANSPORTER" for dec in state["decisions"].values())
+    
+    # We trigger the final recommendation if ALL are terminal OR if AT LEAST one has accepted.
+    if not (all_terminal or anybody_accepted):
+        return # Still in flight
+
+    # 3. Standard Recommendation Logic
     rec_result = await gemini_negotiator.generate_final_recommendation(state_for_llm)
     llm_summary = rec_result.get("summary", "")
     llm_best_id = rec_result.get("best_id")
     
-    # 3. Apply update (RE-ACQUIRE LOCK)
+    # 4. Apply update (RE-ACQUIRE LOCK)
     async with RFQ_LOCKS[rfq_id]:
         state = get_negotiation(rfq_id)
         if not state: return
         
-        # Re-verify best after possible other bids during LLM call
+        # Re-verify scores
         valid_rates_again = {lid: rate for lid, rate in state["rates"].items() if rate > 0}
         quoted_lsps_again = list(valid_rates_again.keys())
-        
         scores = compute_scores(quoted_lsps_again, state["rates"], state["benchmark_price"], state["lsp_profiles"])
         state["scores"] = scores
         
-        # Use LLM choice as primary source of truth for the 'Recommendation' card
-        # but fallback to math-based best if LLM ID is invalid or missing
+        # Selection Logic:
+        # Priority 1: Use LLM recommended ID if it's valid.
+        # Priority 2: Use highest score among those who actually QUOTED.
         best_id = llm_best_id if llm_best_id in valid_rates_again else max(scores, key=scores.get) if scores else None
+        
+        # Check if the chosen winner is someone who accepted the counter-offer
+        winner_accepted = state["decisions"].get(best_id, {}).get("decision") == "ACCEPT_BY_TRANSPORTER"
+        
+        benchmark = state.get("benchmark_price", 0)
+        budget = state.get("max_budget", 0)
+        final_p = state["rates"].get(best_id, 0)
         
         state["recommendation"] = {
             "best_lsp_id": best_id,
             "best_lsp_name": state["lsp_profiles"].get(best_id, {}).get("transporter_name", best_id) if best_id else "None",
-            "final_price": state["rates"].get(best_id, 0.0) if best_id else 0.0,
-            "benchmark": state["benchmark_price"],
+            "final_price": final_p,
+            "benchmark": benchmark,
             "summary": llm_summary,
-            "savings_pct": round(((state["benchmark_price"] - state["rates"].get(best_id, 0)) / state["benchmark_price"]) * 100, 1) if best_id and state["benchmark_price"] > 0 else 0
+            "benchmark_savings_pct": round(((benchmark - final_p) / benchmark) * 100, 1) if best_id and benchmark > 0 else 0,
+            "budget_savings_pct": round(((budget - final_p) / budget) * 100, 1) if best_id and budget > 0 else 0,
+            "is_transporter_acceptance": winner_accepted
         }
 
-        # Check verdict threshold
+        # Transition status to pending_human_verdict if terminal or acceptance occurred
+        if state["status"] not in ("booked", "cancelled"):
+            state["status"] = "pending_human_verdict"
+
+        # Handle Scenario B Completion (All LSPs either DROP, ACCEPT, or EXHAUSTED)
         if state["negotiation_mode"] == "ai":
-            terminal_statuses = ["ACCEPT", "DROP"]
-            all_terminal = all(state["decisions"].get(lid, {}).get("decision") in terminal_statuses for lid in state["active_lsps"])
+            terminal_statuses = ["ACCEPT", "DROP", "EXHAUSTED", "ACCEPT_BY_TRANSPORTER"]
+            all_terminal = all(
+                state["decisions"].get(lid, {}).get("decision") in terminal_statuses 
+                for lid in state["active_lsps"]
+            )
             
             if all_terminal and state["status"] not in ("booked", "cancelled", "pending_human_verdict"):
                 if state.get("auto_accept", False) and best_id:
                     state["status"] = "booked"
-                    state["messages_log"].append("🎯 AI has completed negotiation and generated a recommendation.")
-                    state["messages_log"].append(f"🤖 AUTO-BOOKED: RFQ directly awarded to {best_id} at ₹{state['rates'].get(best_id, 0):,.0f}")
-                    run_in_background(save_outcome(rfq_id, state["recommendation"], state["benchmark_price"]))
+                    state["messages_log"].append(f"🤖 AUTO-BOOKED: RFQ directly awarded to {best_id} at Rs {state['rates'].get(best_id, 0):,.0f}")
+                    run_in_background(save_outcome(rfq_id, state["recommendation"], state["benchmark_price"], state.get("max_budget", 0)))
                 else:
                     state["status"] = "pending_human_verdict"
-                    state["messages_log"].append("🎯 AI has completed negotiation and generated a recommendation. Waiting for Client Verdict.")
+                    state["messages_log"].append("🎯 AI has completed negotiation (Rounds Exhausted). Final Recommendation Ready.")
         
         save_negotiation(rfq_id, state)
         await manager.broadcast_to_rfq(rfq_id, {"type": "accumulator_update", "status": state["status"]})
@@ -416,7 +494,7 @@ async def process_human_decision(rfq_id: str, decision: str) -> Dict[str, Any]:
             winner_id = state["recommendation"]["best_lsp_id"]
             state["messages_log"].append(f"✅ RFQ Booked with {winner_id} at ₹{state['rates'][winner_id]:,.0f}")
             save_negotiation(rfq_id, state)
-            await save_outcome(rfq_id, state["recommendation"], state["benchmark_price"])
+            await save_outcome(rfq_id, state["recommendation"], state["benchmark_price"], state.get("max_budget", 0))
             return {"status": "booked"}
         
         elif decision == "reject":

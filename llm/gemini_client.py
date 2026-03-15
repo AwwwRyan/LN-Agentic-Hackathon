@@ -46,35 +46,32 @@ class FinalRecommendation(BaseModel):
 
 # --- System Prompt ---
 
-SYSTEM_PROMPT = """You are an autonomous freight procurement negotiation agent for Lorri.ai.
+SYSTEM_PROMPT = """You are an autonomous freight procurement negotiation agent for SitBack.
 YOUR ROLE: You balance COST SAVINGS with SERVICE EXCELLENCE.
 
 CORE PHILOSOPHY:
-1. Price is crucial, but RELIABILITY is paramount. A cheap truck that doesn't show up costs more in the long run.
-2. The "Market Benchmark" is a guide, not a hard ceiling. High-service-quality LSPs (4.5+ rating, 200+ fleet) carry a premium.
-3. JUSTIFICATION is your most important output. You must explain the logic of selecting an LSP based on their holistic profile.
-
-STRATEGIC DECISION RULES:
-- If LSP A is ₹2,000 cheaper than LSP B, but LSP B has a 4.8 rating vs LSP A's 3.2 → Recommend LSP B and JUSTIFY the premium.
-- Favor LSPs with "Elite" status (high rating + large fleet).
-- If an LSP is 15%+ above benchmark but has specialized lane experience or a massive fleet, don't drop them immediately; negotiate to find a "Reliability Premium" middle ground.
+1. Price is crucial, but RELIABILITY is paramount. While staying under Budget/Benchmark is ideal, securing an Elite partner is worth a strategic concession.
+2. The "Market Benchmark" and "Manufacturer Budget" are anchors, not absolute walls.
+3. High-service-quality LSPs (4.5+ rating, 200+ fleet) can justify a "Service Premium" (7-10%), but you should always negotiate to minimize this.
 
 NEGOTIATION TACTICS (AI MODE):
 - If Quote is BELOW benchmark → ACCEPT immediately.
-- If Quote is 5-25% ABOVE benchmark → COUNTER. 
-- Counter Formula: benchmark + (quote - benchmark) * 0.25. (Offer to meet 25% of the way from benchmark).
-# - If LSP shows NO movement for 2 rounds → DROP.
+- If Quote is ABOVE benchmark or budget → COUNTER.
+- CONCESSION LOGIC (MIDDLE GROUND): If an LSP shows significant price movement (drops their quote by >5% or >₹10,000 in a single round), you MUST acknowledge this by providing a counter-offer that meets them partway (a "handshake"). Do NOT stick rigidly to the budget wall if it breaks the negotiation session.
+- Counter Formula: benchmark + (quote - benchmark) * 0.12. (Vary the multiplier between 0.10 and 0.13 based on the LSP's commitment and movement to ensure fairness for the client and budget protection).
 - NEVER counter higher than the LSP's latest quote.
 
 JUSTIFICATION STYLE:
-- Professional, data-driven, and analytical.
-- Use terms like "Service Premium," "Reliability Buffer," "Operational Scale," and "Lane Density."
+- Professional, analytical, and data-driven.
+- Acknowledge price movement and explain the logic of the counter-offers.
+- You MAY use percentages (e.g., "12% reduction") to quantify changes.
+- NEVER display mathematical formulas or the logic of your calculations (e.g., "benchmark + gap * multiplier").
 """
 
 
 class GeminiNegotiator:
     def __init__(self):
-        self.api_key = os.getenv("GOOGLE_API_KEY")
+        self.api_key = os.environ.get("GOOGLE_API_KEY")
         if not self.api_key:
             logger.warning("GOOGLE_API_KEY not found in environment.")
         
@@ -111,22 +108,22 @@ class GeminiNegotiator:
 
         === LIVE NEGOTIATION TASK ===
         LSP Profile: {json.dumps({k: v for k, v in lsp_profile.items() if k != 'past_lane_history'}, indent=2)}
-        Manufacturer Budget: {f'₹{budget:,.0f}' if budget else 'Not Specified'} (MUST STAY BELOW THIS IF POSSIBLE)
+        Manufacturer Budget: {f'₹{budget:,.0f}' if budget else 'Not Specified'}
         Lane: {lane}
         Cargo: {cargo}
         Market Benchmark: ₹{benchmark:,.2f}
         Current Quote: ₹{last_quote:,.2f}
         History: {json.dumps(history, indent=2)}
+        Negotiation Round: {round_num}
 
         Decide: ACCEPT, COUNTER, or DROP for this LSP.
         
-        CRITICAL: 
-        1. If Quote > Manufacturer Budget, you should generally COUNTER aggressively. However, if the LSP has an EXCEPTIONALLY high rating (4.5+) and proven scale, you may 'ACCEPT' even if slightly over budget.
-        2. Reference their 'Lane Experience' ({'Verified Experience on Corridor' if has_lane_exp else 'First time on this Corridor'}) in your justification.
-        3. Only ACCEPT if the quote (₹{last_quote:,.2f}) is within or near the budget, unless the LSP is elite.
+        CRITICAL NEGOTIATION RULES: 
+        1. CONCESSION REACTION: If the history shows the LSP just made a significant price drop (check last 2 quotes), you should REWARD them by meeting them partway (use a 10-13% multiplier on the gap between benchmark and quote). Do not just counter at the budget ceiling again, but remain conservative to protect the client's budget.
+        2. ROUND 0 DISCIPLINE: On the first quote (Round 0), you should almost always COUNTER if the price is > Budget/Benchmark.
+        3. Reference their 'Lane Experience' ({'Verified Experience on Corridor' if has_lane_exp else 'First time on this Corridor'}) in your justification.
         4. If you COUNTER, your counter_price MUST be LOWER than ₹{last_quote:,.2f}.
         5. If an LSP is significantly above budget and has shown no price movement for 2 rounds, you should DROP them.
-        6. If the history shows you already 'ACCEPTED' this price, but you are being asked again, it means the client wants a BETTER deal. In this case, you MUST COUNTER for an additional 2-5% discount.
         """
         
         if force_better_deal:
@@ -140,13 +137,18 @@ class GeminiNegotiator:
             result = await self.decision_chain.ainvoke(prompt)
             decision = result.dict()
             
-            # RELAXED OVERRIDE: Allow over-budget acceptance ONLY for exceptional LSPs (Rating 4.5+)
+            # SOFT OVERRIDE: Prevent over-budget acceptance in Round 0 (Initial entry) ONLY
             rating = lsp_profile.get("overall_rating", 0)
-            if decision["decision"] == "ACCEPT" and budget > 0 and last_quote > budget:
-                if rating < 4.5:
-                    decision["decision"] = "COUNTER"
-                    decision["counter_price"] = budget
-                    decision["reasoning"] = f"Budget Control: LSP (Rating {rating}) is over budget. Forcing counter at budget ceiling."
+            over_budget_limit = budget * 1.08 if budget > 0 else benchmark * 1.08
+            
+            # If it's the very first quote (Round 0) and price is > 8% over budget/benchmark, FORCE COUNTER
+            if decision["decision"] == "ACCEPT" and (round_num == 0) and (last_quote > over_budget_limit):
+                decision["decision"] = "COUNTER"
+                # Target budget or benchmark (whichever is lower)
+                target = min(budget, benchmark) if budget > 0 else benchmark
+                decision["counter_price"] = target
+                decision["reasoning"] = f"Initial Round Safeguard: Quote is {((last_quote/target)-1)*100:.1f}% over target. Forcing initial negotiation."
+                decision["justification"] = f"We value your service profile, but the initial quote of ₹{last_quote:,.0f} exceeds our target. We propose ₹{target:,.0f} to begin alignment."
 
             # STALEMATE DETECTION: Drop LSPs that are stuck above budget
             if budget > 0 and last_quote > budget:
@@ -165,10 +167,15 @@ class GeminiNegotiator:
             return decision
         except Exception as e:
             logger.error(f"LLM error for negotiation: {e}")
+            # Fallback Concession: benchmark + 10% of the gap
+            fallback_price = benchmark
+            if last_quote > benchmark:
+                fallback_price = benchmark + (last_quote - benchmark) * 0.10
+            
             return {
                 "decision": "COUNTER",
                 "justification": f"We appreciate your quote for {lane}. To align with current market conditions, we propose a more competitive rate.",
-                "counter_price": round(min(benchmark, last_quote * 0.9), -2),
+                "counter_price": round(fallback_price, -2),
                 "reasoning": f"LLM error fallback: {str(e)}"
             }
 
@@ -188,6 +195,7 @@ class GeminiNegotiator:
         Total Rounds: {state.get('current_round', 0)}
         LSP Profiles: {json.dumps(state['lsp_profiles'], indent=2)}
         Active LSPs & Final Rates: {json.dumps(state['rates'], indent=2)}
+        Negotiation Progress (Decisions): {json.dumps(state.get('decisions', {}), indent=2)}
         Scores: {json.dumps(state.get('scores', {}))}
 
         === TASK ===
@@ -200,9 +208,12 @@ class GeminiNegotiator:
 
         Focus on:
         1. Trade-off: Price vs Reliability vs Lane Experience.
-        2. Budget Alignment: Did we beat the budget constraint?
-        3. Lane Specificity: Does the winner have proven operating experience on {lane}?
-        4. Why not other LSPs? (Specifically: Low Rating, High Price, or lack of scale).
+        2. Negotiation Dynamics: Explain how the final price was reached. Acknowledge any significant price reductions from the LSP and how the agent adjusted its counter-offers in response to find a viable middle ground.
+        3. Budget Alignment: Clear comparison against the manufacturer budget.
+        4. Lane Specificity: Does the winner have proven operating experience on {lane}?
+        5. Why not other LSPs? (Specifically: Low Rating, High Price, or lack of scale).
+        
+        DO NOT use any mathematical formulas or show your calculation logic. You may use percentages and round numbers to support your analysis.
 
         Keep it sharp, bold, and DECISIVE.
         """
