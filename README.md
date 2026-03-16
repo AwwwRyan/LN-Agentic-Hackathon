@@ -1,4 +1,4 @@
-# FreightAI — AI-Powered Freight Negotiation Platform
+# SitBack — AI-Powered Freight Negotiation Platform
 
 > Autonomous AI agents that negotiate freight rates with multiple transporters in parallel — so you don't have to.
 
@@ -6,9 +6,9 @@
 
 ---
 
-## What is FreightAI?
+## What is SitBack?
 
-FreightAI is a B2B logistics SaaS platform that automates freight rate procurement for manufacturers and shippers. Instead of manually calling transporters and negotiating rates, clients submit a shipment request and an AI agent handles the entire negotiation — running parallel conversations with multiple LSPs (Logistics Service Providers), countering quotes, and recommending the best deal.
+SitBack is a B2B logistics SaaS platform that automates freight rate procurement for manufacturers and shippers. Instead of manually calling transporters and negotiating rates, clients submit a shipment request and an AI agent handles the entire negotiation — running parallel conversations with multiple LSPs (Logistics Service Providers), countering quotes, and recommending the best deal.
 
 **The core loop:**
 
@@ -168,4 +168,4 @@ It connects to this backend via REST and WebSocket. To point it at a local backe
 
 ## Built at
 
-**LN Agentic Hackathon** — exploring autonomous multi-agent systems for logistics procurement.
+**LogisticsNow LoRRI Agentic Hackathon 2026** 
